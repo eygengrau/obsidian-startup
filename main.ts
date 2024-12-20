@@ -1,134 +1,140 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { Plugin, moment, TFile } from 'obsidian';
 
-// Remember to rename these classes and interfaces!
+export default class Startup extends Plugin {
+	// eslint-disable-next-line
+	private tp = null as any;
 
-interface MyPluginSettings {
-	mySetting: string;
-}
+	private dailyFolder = '_Daily/';
+	private templatePath = '_Templates/Daily.md';
+	private template = '';
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
-
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+	private isNote = /^\d{4}-\d{2}-\d{2}/;
+	private isDaily = /^\d{4}-\d{2}-\d{2}$/;
 
 	async onload() {
-		await this.loadSettings();
+		this.setMomentLocale();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		// this.AIcreateDaily('2024-12-20');
+
+		this.app.workspace.onLayoutReady(async () => {
+			await this.setTemplater();
+			await this.getTemplate();
+			await this.checkAllForMissingDailys();
+			this.registerEvent(
+				this.app.vault.on('create', this.checkForMissingDaily.bind(this))
+			);
 		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
 	}
 
-	onunload() {
-
+	private setMomentLocale() {
+		console.log('STARTUP: Set moment locale to "de"');
+		moment.locale('de');
 	}
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+	private async setTemplater() {
+		// @ts-ignore: app.plugins exist
+		const templater = await this.app.plugins.getPlugin('templater-obsidian')
+			.templater;
+		this.tp = templater.current_functions_object;
 	}
 
-	async saveSettings() {
-		await this.saveData(this.settings);
+	private async getTemplate() {
+		const file = this.app.vault.getFileByPath(this.templatePath) as TFile;
+		const content = await this.app.vault.cachedRead(file);
+		this.template = content.replace('<% tp.file.cursor() %>\n', '');
 	}
+
+	private async checkForMissingDaily(file: TFile) {
+		if (!file) return;
+		if (!file.path.startsWith(this.dailyFolder)) return;
+
+		// @ts-ignore basename exists
+		const filename = file.basename;
+		if (!this.isNote.test(filename)) return;
+		if (this.isDaily.test(filename)) return;
+
+		const date = filename.slice(0, 10);
+		const daily = this.getDailyPath(date) + date + '.md';
+		if (await this.tp.file.exists(daily)) return;
+		console.log('STARTUP');
+		console.log('    Note without corresponding daily created: ', filename);
+		setTimeout(async () => await this.createDaily(date), 500);
+	}
+
+	private async checkAllForMissingDailys() {
+		console.log('STARTUP: Check for missing daily notes');
+		const all: TFile[] = this.app.vault.getMarkdownFiles();
+		const path = all.filter((file) => file.path.startsWith(this.dailyFolder));
+		const files = path.filter((file) => this.isNote.test(file.basename));
+		const [dailys, notes] = partition(
+			files,
+			(f: TFile) => f.basename.length === 10
+		);
+		const dailyNames = dailys.map((daily: TFile) => daily.basename);
+
+		notes.forEach((note: TFile) => {
+			const correspondingDaily = note.basename.slice(0, 10);
+			if (dailyNames.includes(correspondingDaily)) return;
+
+			console.log('    Note without corresponding daily: ', note.basename);
+			this.createDaily(correspondingDaily);
+			dailyNames.push(correspondingDaily);
+		});
+	}
+
+	private async createDaily(date: string) {
+		const filename = date;
+		const path = this.getDailyPath(date);
+		console.log('    Create: ', path + filename);
+		await this.tp.file.create_new(this.template, filename, false, path);
+	}
+
+	private getDailyPath(date: string) {
+		return this.dailyFolder + moment(date).format('YYYY/MM MMMM/');
+	}
+
+	/* private async AIcreateDaily(date: string) {
+		try {
+			const quickAddPlugin = this.app.plugins.plugins.quickadd;
+			if (!quickAddPlugin) throw new Error('QuickAdd plugin not found');
+
+			const choiceName = 'Daily'; // Replace with your macro name
+			const choice = quickAddPlugin.settings.choices.find(
+				(choice: any) => choice.name === choiceName
+			);
+			if (!choice) throw new Error(`Choice "${choiceName}" not found`);
+
+			// Store the original variable configuration
+			const originalPath = choice.fileNameFormat.format;
+			const newPath = `_Daily/${moment(date).format(
+				'YYYY/MM MMMM/YYYY-MM-DD'
+			)}`;
+			console.log(choice);
+
+			choice.fileNameFormat.format = newPath;
+			console.log(choice.fileNameFormat.format);
+
+			// Execute the macro with our temporary configuration
+			await quickAddPlugin.api.executeChoice(choice.name);
+
+			// Restore the original configuration
+			choice.fileNameFormat.format = originalPath;
+			console.log(choice.fileNameFormat.format);
+
+			console.log(`Daily note created for ${date.format('YYYY-MM-DD')}`);
+		} catch (error) {
+			console.error('Failed to create daily note:', error);
+		}
+	} */
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+function partition<T>(array: Array<T>, isValid: (e: T) => boolean) {
+	return array.reduce(
+		([pass, fail], elem) => {
+			return isValid(elem)
+				? [[...pass, elem], fail]
+				: [pass, [...fail, elem]];
+		},
+		[[], []]
+	);
 }
